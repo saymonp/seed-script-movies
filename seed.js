@@ -82,17 +82,21 @@ async function getMovieDetails(id) {
         descricao_pt = null;
     }
 
-
     return {
         tmdb_id: data.id,
+        imdb_id: data.imdb_id || null,
+
+        titulo_original: data.original_title || null,
 
         // 🇧🇷
         titulo_br: ptBR?.data?.title || null,
         descricao_br: descricao_pt,
+        tagline_br: data.tagline || null,
 
         // 🇺🇸
         titulo_en: enUS?.data?.title || data.original_title || null,
         descricao_en: enUS?.data?.overview || data.overview || null,
+        tagline_en: enUS.data.tagline || null,
 
         rating: data.vote_average || null,
         duracao: data.runtime || null,
@@ -110,7 +114,9 @@ async function getMovieDetails(id) {
         poster_path_us: data.poster_path || null,
         backdrop_path_us: data.backdrop_path || null,
 
-        diretor: data.credits?.crew?.find(c => c.job === 'Director')?.name || null
+        diretor: data.credits?.crew?.find(c => c.job === 'Director')?.name || null,
+
+        homepage: data.homepage || null
     };
 }
 
@@ -131,4 +137,7 @@ async function run() {
     }
 }
 
-run()
+//run()
+
+const res = await getMovieDetails(1084242);
+console.log(res);

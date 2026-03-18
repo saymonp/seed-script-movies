@@ -1,0 +1,17 @@
+{
+  "name": "seed-script-movies",
+  "version": "1.0.0",
+  "description": "Script para popular o banco de dados.",
+  "type": "module",
+  "main": "seed.js",
+  "scripts": {
+    "seed": "node --env-file=.env seed.js"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1011.0",
+    "axios": "^1.13.6",
+    "pg": "^8.20.0"
+  }
+}

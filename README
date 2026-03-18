@@ -5,5 +5,5 @@ Script para popular o banco de dados.
 ## Executar o Script
 
 ```bash
-node --env-file=.env seed.js
+npm run seed
 ```

@@ -7,3 +7,9 @@ Script para popular o banco de dados.
 ```bash
 npm run seed
 ```
+
+## Iniciar Banco de Dados
+
+```bash
+psql -U user -d database -f init.sql
+```

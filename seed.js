@@ -12,12 +12,13 @@ const S3_BUCKET = process.env.S3_BUCKET;
 const S3_ENDPOINT = process.env.S3_ENDPOINT
 const REGION = process.env.REGION
 const MinIO_USER = process.env.MINIO_ROOT_USER
-const MinIO_PASSWORD = process.env.MinIO_PASSWORD
+const MinIO_PASSWORD = process.env.MINIO_ROOT_PASSWORD
 
 const DB_USER = process.env.POSTGRES_USER
 const DB_PASSWORD = process.env.POSTGRES_PASSWORD
 const DB_NAME = process.env.POSTGRES_DB
-const DB_ENDPOINT = process.env.POSTGRES_ENDPOINT
+const DB_HOST = process.env.POSTGRES_HOST
+const DB_PORT = process.env.POSTGRES_PORT
 
 const QUANTIDADE_PAGINAS = 1; // Cada página tem 20 filmes (Total: 100)
 
@@ -126,71 +127,48 @@ async function getMovieDetails(id) {
 }
 
 
-async function handleColecao(client, collection) {
-    // Se o filme não pertencer a nenhuma coleção, paramos aqui.
+async function handleColecao(client, s3, collection) {
     if (!collection || !collection.id) return null;
 
     try {
-        // 1. Primeiro, baixamos as imagens da coleção para o SEU S3
-        // (Usando a função uploadToMinio que criamos anteriormente)
-        const s3Poster = await uploadToMinio(collection.poster_path, 'collections/posters');
-        const s3Backdrop = await uploadToMinio(collection.backdrop_path, 'collections/backdrops');
+        const s3Poster = await uploadToMinio(s3, collection.poster_path, 'collections/posters', 'original');
+        const s3PosterThumb = await uploadToMinio(s3, collection.poster_path, 'collections/posters', 'w500'); // Versão menor
+        const s3Backdrop = await uploadToMinio(s3, collection.backdrop_path, 'collections/backdrops', 'original');
 
-        // 2. Inserimos ou Atualizamos a coleção no Postgres
-        // O "ON CONFLICT" garante que não teremos erro se a coleção já existir
         const query = `
-            INSERT INTO colecoes (tmdb_id, nome, poster_path, backdrop_path)
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT (tmdb_id) 
-            DO UPDATE SET 
-                nome = EXCLUDED.nome,
-                poster_path = EXCLUDED.poster_path,
+            INSERT INTO colecoes (tmdb_id, nome, poster_path, poster_thumb, backdrop_path)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (tmdb_id) DO UPDATE SET 
+                poster_thumb = EXCLUDED.poster_thumb,
                 backdrop_path = EXCLUDED.backdrop_path
             RETURNING id;
         `;
 
         const res = await client.query(query, [
-            collection.id,      // tmdb_id
-            collection.name,    // nome
-            s3Poster,           // URL do seu S3
-            s3Backdrop          // URL do seu S3
+            collection.id, collection.name, s3Poster, s3PosterThumb, s3Backdrop
         ]);
-
-        // Retornamos o ID interno (SERIAL) para ser usado na FK da tabela movies
         return res.rows[0].id;
-
-    } catch (error) {
-        console.error(`❌ Erro ao processar coleção ${collection.name}:`, error.message);
-        return null;
-    }
+    } catch (error) { return null; }
 }
 
 
-async function uploadToMinio(s3, path, folder) {
+async function uploadToMinio(s3, path, folder, size = 'original') {
     if (!path) return null;
 
-    try {
-        const fileName = `${folder}/${path.replace('/', '')}`;
-        const imageUrl = `https://image.tmdb.org/t/p/original${path}`;
+    // O nome do arquivo no S3 incluirá o tamanho para não sobrescrever
+    const fileName = `${folder}/${size}_${path.replace('/', '')}`;
+    const imageUrl = `https://image.tmdb.org/t/p/${size}${path}`;
 
-        // Baixa a imagem da API
-        const response = await axios.get(imageUrl, { responseType: 'arraybuffer' });
+    const response = await axios.get(imageUrl, { responseType: 'arraybuffer' });
 
-        // Sobe para o MinIO
-        await s3.send(new PutObjectCommand({
-            Bucket: S3_BUCKET,
-            Key: fileName,
-            Body: response.data,
-            ContentType: 'image/jpeg',
-            ACL: 'public-read' // Se o seu bucket permitir
-        }));
+    await s3.send(new PutObjectCommand({
+        Bucket: S3_BUCKET,
+        Key: fileName,
+        Body: response.data,
+        ContentType: 'image/jpeg'
+    }));
 
-        // Retorna a URL do seu S3 Local
-        return `${S3_ENDPOINT}/${S3_BUCKET}/${fileName}`;
-    } catch (error) {
-        console.error(`❌ Eroc ao subir imagem ${path}:`, error.message);
-        return null;
-    }
+    return `${S3_ENDPOINT}/${S3_BUCKET}/${fileName}`;
 }
 
 async function getOrCreate(client, tabela, nome) {
@@ -222,10 +200,10 @@ async function run() {
 
     const client = new Client({
         user: DB_USER,
-        host: DB_ENDPOINT,
+        host: DB_HOST,
         database: DB_NAME,
         password: DB_PASSWORD,
-        port: 5432,
+        port: DB_PORT,
     });
 
     // Configuração do S3 (MinIO Local)
@@ -246,97 +224,113 @@ async function run() {
             for (const item of popular.data.results) {
                 const movie = await getMovieDetails(item.id);
                 await client.query('BEGIN');
-                // --- DENTRO DO LOOP DO RUN() ---
+                try {
+                    // --- DENTRO DO LOOP DO RUN() ---
 
-                // 1. Processa as imagens (S3)
+                    // 1. Processa as imagens (S3)
 
-                const posterBrS3 = await uploadToMinio(s3, movie.poster_path_br, 'posters_br');
-                const backdropBrS3 = await uploadToMinio(s3, movie.backdrop_path_br, 'backdrops_br');
-                const posterEnS3 = await uploadToMinio(s3, movie.poster_path_us, 'posters_en');
-                const backdropEnS3 = await uploadToMinio(s3, movie.backdrop_path_us, 'backdrops_en');
+                    // 1. Processa as imagens (S3) - Posters em duas qualidades
+                    const posterBrS3 = await uploadToMinio(s3, movie.poster_path_br, 'posters_br', 'original');
+                    const posterBrThumbS3 = await uploadToMinio(s3, movie.poster_path_br, 'posters_br', 'w500');
 
-                // 2. Se o filme tiver coleção, sobe as imagens dela também
-                if (movie.belongs_to_collection) {
-                    const col = movie.belongs_to_collection;
-                    col.poster_path = await uploadToMinio(col.poster_path, 'collections/posters');
-                    col.backdrop_path = await uploadToMinio(col.backdrop_path, 'collections/backdrops');
-                }
+                    const backdropBrS3 = await uploadToMinio(s3, movie.backdrop_path_br, 'backdrops_br', 'original');
 
-                // 1. Trata a Coleção primeiro (por causa da FK)
-                let colecaoId = null;
-                if (movie.belongs_to_collection) {
-                    colecaoId = await handleColecao(client, movie.belongs_to_collection);
-                }
+                    const posterEnS3 = await uploadToMinio(s3, movie.poster_path_us, 'posters_en', 'original');
+                    const posterEnThumbS3 = await uploadToMinio(s3, movie.poster_path_us, 'posters_en', 'w500');
 
-                // 2. Insere o Filme principal
-                const movieQuery = `
-                    INSERT INTO movies (
-                        tmdb_id, titulo_original, titulo_br, descricao_br, tagline_br,
-                        titulo_en, descricao_en, tagline_en, rating, duracao,
-                        lingua_origem, poster_path_br, backdrop_path_br, 
-                        poster_path_us, backdrop_path_us, homepage, colecao_id 
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-                    ON CONFLICT (tmdb_id) DO UPDATE 
-                    SET rating = EXCLUDED.rating WHERE movies.rating IS DISTINCT FROM EXCLUDED.rating
-                    RETURNING id;
+                    const backdropEnS3 = await uploadToMinio(s3, movie.backdrop_path_us, 'backdrops_en', 'original');
+
+                    // 2. Se o filme tiver coleção, sobe as imagens dela também
+                    if (movie.belongs_to_collection) {
+                        const col = movie.belongs_to_collection;
+                        col.poster_path = await uploadToMinio(col.poster_path, 'collections/posters');
+                        col.backdrop_path = await uploadToMinio(col.backdrop_path, 'collections/backdrops');
+                    }
+
+                    // 1. Trata a Coleção primeiro (por causa da FK)
+                    let colecaoId = null;
+                    if (movie.belongs_to_collection) {
+                        colecaoId = await handleColecao(client, movie.belongs_to_collection);
+                    }
+
+                    // 2. Insere o Filme principal
+                    const movieQuery = `
+                INSERT INTO movies (
+                    tmdb_id, titulo_original, titulo_br, descricao_br, tagline_br,
+                    titulo_en, descricao_en, tagline_en, rating, duracao,
+                    lingua_origem, poster_path_br, poster_thumb_br, backdrop_path_br, 
+                    poster_path_us, poster_thumb_us, backdrop_path_us, homepage, colecao_id 
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+                ON CONFLICT (tmdb_id) DO UPDATE 
+                SET rating = EXCLUDED.rating
+                RETURNING id;
                 `;
 
-                const movieRes = await client.query(movieQuery, [
-                    movie.tmdb_id, movie.titulo_original, movie.titulo_br, movie.descricao_br, movie.tagline_br,
-                    movie.titulo_en, movie.descricao_en, movie.tagline_en, movie.rating, movie.duracao,
-                    movie.lingua_origem,
-                    posterBrS3,    // URL do MinIO
-                    backdropBrS3,  // URL do MinIO
-                    posterEnS3,    // URL do MinIO
-                    backdropEnS3,  // URL do MinIO
-                    movie.homepage, colecaoId
-                ]);
+                    const movieRes = await client.query(movieQuery, [
+                        movie.tmdb_id, movie.titulo_original, movie.titulo_br, movie.descricao_br, movie.tagline_br,
+                        movie.titulo_en, movie.descricao_en, movie.tagline_en, movie.rating, movie.duracao,
+                        movie.lingua_origem,
+                        posterBrS3, posterBrThumbS3, backdropBrS3,
+                        posterEnS3, posterEnThumbS3, backdropEnS3,
+                        movie.homepage, colecaoId
+                    ]);
 
-                const internalMovieId = movieRes.rows[0].id;
+                    const internalMovieId = movieRes.rows[0].id;
 
-                // 3. Relacionamentos (Gêneros, Diretores, Estúdios, Países)
+                    // 3. Relacionamentos (Gêneros, Diretores, Estúdios, Países)
 
-                // Gêneros (Vem como array de objetos no rawData)
-                if (movie.genres) {
-                    for (const g of movie.genres) {
-                        const gId = await getOrCreate(client, 'generos', g.name);
-                        await client.query(`INSERT INTO movie_generos (movie_id, genero_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [internalMovieId, gId]);
+                    // Gêneros (Vem como array de objetos no rawData)
+                    if (movie.genres) {
+                        for (const g of movie.genres) {
+                            const gId = await getOrCreate(client, 'generos', g.name);
+                            await client.query(`INSERT INTO movie_generos (movie_id, genero_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [internalMovieId, gId]);
+                        }
                     }
-                }
 
-                // Diretor
-                if (movie.diretor) {
-                    const dId = await getOrCreate(client, 'diretores', movie.diretor);
-                    await client.query(`INSERT INTO movie_diretores (movie_id, diretor_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [internalMovieId, dId]);
-                }
-
-                // Estúdio
-                if (movie.estudio) {
-                    const eId = await getOrCreate(client, 'estudios', movie.estudio);
-                    await client.query(`INSERT INTO movie_estudios (movie_id, estudio_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [internalMovieId, eId]);
-                }
-
-                // Países (Vem no movie.pais_origem como string separada por vírgula no seu getMovieDetails)
-                if (movie.pais_origem) {
-                    const paises = movie.pais_origem.split(', ');
-                    for (const pNome of paises) {
-                        const pId = await getOrCreate(client, 'paises', pNome);
-                        await client.query(`INSERT INTO movie_paises (movie_id, pais_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [internalMovieId, pId]);
+                    // Diretor
+                    if (movie.diretor) {
+                        const dId = await getOrCreate(client, 'diretores', movie.diretor);
+                        await client.query(`INSERT INTO movie_diretores (movie_id, diretor_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [internalMovieId, dId]);
                     }
+
+                    // Estúdio
+                    if (movie.estudio) {
+                        const eId = await getOrCreate(client, 'estudios', movie.estudio);
+                        await client.query(`INSERT INTO movie_estudios (movie_id, estudio_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [internalMovieId, eId]);
+                    }
+
+                    // Países (Vem no movie.pais_origem como string separada por vírgula no seu getMovieDetails)
+                    if (movie.pais_origem) {
+                        const paises = movie.pais_origem.split(', ');
+                        for (const pNome of paises) {
+                            const pId = await getOrCreate(client, 'paises', pNome);
+                            await client.query(`INSERT INTO movie_paises (movie_id, pais_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [internalMovieId, pId]);
+                        }
+                    }
+
+                    await client.query('COMMIT');
+                    console.log(`Processado: ${movie.titulo_br}`);
+
+
+
+                } catch (error) {
+                    // SE QUALQUER COISA FALHOU (S3 ou Banco), CANCELA TUDO DESTE FILME
+                    await client.query('ROLLBACK');
+                    console.log(`❌ Erro no filme ${movie.titulo_br}. Nada foi salvo.`);
+                    console.error(`Motivo: ${error.message}`);
+
+                    // Opcional: break; se quiser parar todo o script no primeiro erro
                 }
 
-                await client.query('COMMIT');
-                console.log(`Processado: ${movie.titulo_br}`);
             }
-
         }
     } catch (err) {
-        console.error("Erro no Seed:", err);
+        console.error("Erro crítico na conexão ou busca inicial:", err);
     } finally {
         await client.end();
-        console.log("Processo finalizado.");
     }
 }
+
 
 
 run()

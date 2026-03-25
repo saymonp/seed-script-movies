@@ -18,11 +18,15 @@ CREATE TABLE movies (
 
     lingua_origem TEXT,
 
-    poster_path_br TEXT,
-    backdrop_path_br TEXT,
-
-    poster_path_us TEXT,
-    backdrop_path_us TEXT,
+    -- Imagens BR
+    poster_path_br TEXT,      -- Original/High
+    poster_thumb_br TEXT,     -- Otimizada 
+    backdrop_path_br TEXT,    -- Original/High
+    
+    -- Imagens US
+    poster_path_us TEXT,      -- Original/High
+    poster_thumb_us TEXT,     -- Otimizada
+    backdrop_path_us TEXT,    -- Original/High
 
     homepage TEXT,
 
@@ -81,10 +85,13 @@ CREATE TABLE colecoes (
     tmdb_id INTEGER UNIQUE NOT NULL,
     nome TEXT,
     poster_path TEXT,
+    poster_thumb TEXT,
     backdrop_path TEXT
 );
 
 -- Adicione uma chave estrangeira na tabela de movies
 ALTER TABLE movies ADD COLUMN colecao_id INTEGER REFERENCES colecoes(id) ON DELETE SET NULL;
+
+CREATE INDEX IF NOT EXISTS idx_movies_poster_thumb_br ON movies(poster_thumb_br);
 
 COMMIT;

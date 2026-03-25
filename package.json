@@ -5,7 +5,8 @@
   "type": "module",
   "main": "seed.js",
   "scripts": {
-    "seed": "node --env-file=.env seed.js"
+    "seed": "node --env-file=.env seed.js 1 false",
+    "seed:update": "node --env-file=.env seed.js 5 true"
   },
   "author": "",
   "license": "ISC",

@@ -29,6 +29,10 @@ const FORCAR_UPDATE = process.argv[3] === 'true';
 
 console.log(`Configuração: Páginas: ${QUANTIDADE_PAGINAS} | Forçar Update: ${FORCAR_UPDATE}`);
 
+
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+
 // --- FUNÇÃO DE CHECAGEM ---
 async function filmeJaExiste(client, tmdbId) {
     const res = await client.query('SELECT id FROM movies WHERE tmdb_id = $1', [tmdbId]);
@@ -140,18 +144,18 @@ async function getMovieDetails(id) {
 }
 
 
+
 async function handleColecao(client, s3, collection) {
-    async function handleColecao(client, s3, collection) {
-        if (!collection || !collection.id) return null;
+    if (!collection || !collection.id) return null;
 
-        try {
-            // Guardamos as URLs geradas em constantes separadas
-            // Assim não estragamos os paths originais (collection.poster_path)
-            const s3Poster = await uploadToMinio(s3, collection.poster_path, 'collections/posters', 'original');
-            const s3PosterThumb = await uploadToMinio(s3, collection.poster_path, 'collections/posters', 'w500');
-            const s3Backdrop = await uploadToMinio(s3, collection.backdrop_path, 'collections/backdrops', 'original');
+    try {
+        // Guardamos as URLs geradas em constantes separadas
+        // Assim não estragamos os paths originais (collection.poster_path)
+        const s3Poster = await uploadToMinio(s3, collection.poster_path, 'collections/posters', 'original');
+        const s3PosterThumb = await uploadToMinio(s3, collection.poster_path, 'collections/posters', 'w500');
+        const s3Backdrop = await uploadToMinio(s3, collection.backdrop_path, 'collections/backdrops', 'original');
 
-            const query = `
+        const query = `
             INSERT INTO colecoes (tmdb_id, nome, poster_path, poster_thumb, backdrop_path)
             VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (tmdb_id) DO UPDATE SET 
@@ -160,21 +164,21 @@ async function handleColecao(client, s3, collection) {
             RETURNING id;
         `;
 
-            const res = await client.query(query, [
-                collection.id,
-                collection.name,
-                s3Poster,
-                s3PosterThumb,
-                s3Backdrop
-            ]);
+        const res = await client.query(query, [
+            collection.id,
+            collection.name,
+            s3Poster,
+            s3PosterThumb,
+            s3Backdrop
+        ]);
 
-            return res.rows[0].id;
-        } catch (error) {
-            console.error(`❌ Erro ao processar coleção ${collection.name}:`, error.message);
-            throw error; // Lançar o erro para que o ROLLBACK do filme principal funcione!
-        }
+        return res.rows[0].id;
+    } catch (error) {
+        console.error(`❌ Erro ao processar coleção ${collection.name}:`, error.message);
+        throw error; // Lançar o erro para que o ROLLBACK do filme principal funcione!
     }
 }
+
 
 
 async function uploadToMinio(s3, path, folder, size = 'original') {
@@ -244,9 +248,11 @@ async function run() {
         console.log("Conectado ao banco. Iniciando Seed...");
 
         for (let p = 1; p <= QUANTIDADE_PAGINAS; p++) {
+            
             const popular = await axios.get(`https://api.themoviedb.org/3/movie/popular?language=pt-BR&page=${p}`, tmdb_header);
 
             for (const item of popular.data.results) {
+                if (FORCAR_UPDATE) await sleep(300);
                 if (!FORCAR_UPDATE) {
                     const existe = await filmeJaExiste(client, item.id);
                     if (existe) {
@@ -306,8 +312,8 @@ async function run() {
 
                     // 3. Relacionamentos (Gêneros, Diretores, Estúdios, Países)
 
-                    if (movie.genres) {
-                        for (const g of movie.genres) {
+                    if (movie.generos) {
+                        for (const g of movie.generos) {
                             const gId = await getOrCreate(client, 'generos', g.name);
                             await client.query(`INSERT INTO movie_generos (movie_id, genero_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [internalMovieId, gId]);
                         }
@@ -375,8 +381,8 @@ async function run() {
             console.log(`📄 Relatório de erros salvo em: ${fileName}`);
             console.log(`⚠️ Total de falhas: ${logsDeErro.length}`);
             console.log(`--------------------------------------------------`);
-            await client.end();
         }
+        await client.end();
     }
 }
 

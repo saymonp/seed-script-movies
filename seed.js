@@ -67,8 +67,46 @@ async function traduzir(texto, target = 'pt') {
     }
 }
 
+async function createSlug(client, titulo_br, titulo_en, data){
+    let slug_pt = null;
+    let slug_en = null;
+    
+    if (titulo_br) {
+        slug_pt = titulo_br
+            .toString()
+            .toLowerCase()
+            .normalize('NFD') // Remove acentos
+            .replace(/[\u0300-\u036f]/g, '')
+            .replace(/\s+/g, '-') // Espaços por traços
+            .replace(/[^\w-]+/g, ''); // Remove símbolos
+    }
 
-async function getMovieDetails(id) {
+    if (titulo_en) {
+        slug_en = titulo_en
+            .toString()
+            .toLowerCase()
+            .normalize('NFD') // Remove acentos
+            .replace(/[\u0300-\u036f]/g, '')
+            .replace(/\s+/g, '-') // Espaços por traços
+            .replace(/[^\w-]+/g, ''); // Remove símbolos
+    }
+
+    const exists = await client.query('SELECT id FROM movies WHERE slug_en = $1', [slug_en]);
+
+    if (exists.rows.length === 0) {
+        // Slug livre
+        return { slug_pt: slug_pt, slug_en: slug_en };
+    } else {
+        // Slug já existe
+        const finalSlug_en = `${slug_en}-${data.split('-')[0] || Math.floor(Math.random() * 999)}`
+        const finalSlug_pt = `${slug_pt}-${data.split('-')[0] || Math.floor(Math.random() * 999)}`
+        return { slug_pt: finalSlug_pt, slug_en: finalSlug_en };
+
+    }
+
+}
+
+async function getMovieDetails(client, id) {
     // Buscamos detalhes em PT-BR e anexamos os lançamentos (release_dates) e provedores (watch/providers)
     const url = `https://api.themoviedb.org/3/movie/${id}?append_to_response=translations,images,credits&include_image_language=en,pt-BR,null&language=pt-BR`;
 
@@ -90,12 +128,15 @@ async function getMovieDetails(id) {
 
     let descricao_pt;
 
+    const slug = await createSlug(client, ptBR?.data?.title, enUS?.data?.title || data.original_title, data.release_date || null);
+
     // 1. Se já tem em português → usa
     if (ptBR?.data?.overview) {
         descricao_pt = ptBR.data.overview;
 
         // 2. Se não tem PT, mas tem inglês → traduz
     } else if (enUS?.data?.overview) {
+        await sleep(60000);
         descricao_pt = await traduzir(enUS.data.overview);
 
         // 3. Se não tem nada → null
@@ -116,7 +157,7 @@ async function getMovieDetails(id) {
         // 🇺🇸
         titulo_en: enUS?.data?.title || data.original_title || null,
         descricao_en: enUS?.data?.overview || data.overview || null,
-        tagline_en: enUS.data.tagline || null,
+        tagline_en: enUS?.data.tagline || null,
 
         rating: data.vote_average || null,
         duracao: data.runtime || null,
@@ -139,7 +180,13 @@ async function getMovieDetails(id) {
 
         homepage: data.homepage || null,
 
-        belongs_to_collection: data.belongs_to_collection || null
+        belongs_to_collection: data.belongs_to_collection || null,
+
+        release_date: data.release_date || null,
+
+        slug_pt: slug.slug_pt, 
+        slug_en: slug.slug_en
+
     };
 }
 
@@ -247,12 +294,12 @@ async function run() {
         await client.connect();
         console.log("Conectado ao banco. Iniciando Seed...");
 
-        for (let p = 1; p <= QUANTIDADE_PAGINAS; p++) {
+        for (let p = 20; p <= QUANTIDADE_PAGINAS; p++) {
             
             const popular = await axios.get(`https://api.themoviedb.org/3/movie/popular?language=pt-BR&page=${p}`, tmdb_header);
 
             for (const item of popular.data.results) {
-                if (FORCAR_UPDATE) await sleep(300);
+                if (FORCAR_UPDATE) await sleep(5000);
                 if (!FORCAR_UPDATE) {
                     const existe = await filmeJaExiste(client, item.id);
                     if (existe) {
@@ -260,7 +307,7 @@ async function run() {
                         continue; // Pula para o próximo filme do loop
                     }
                 }
-                const movie = await getMovieDetails(item.id);
+                const movie = await getMovieDetails(client, item.id);
                 await client.query('BEGIN');
                 try {
                     // --- DENTRO DO LOOP DO RUN() ---
@@ -292,8 +339,8 @@ async function run() {
                     tmdb_id, titulo_original, titulo_br, descricao_br, tagline_br,
                     titulo_en, descricao_en, tagline_en, rating, duracao,
                     lingua_origem, poster_path_br, poster_thumb_br, backdrop_path_br, 
-                    poster_path_us, poster_thumb_us, backdrop_path_us, homepage, colecao_id 
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+                    poster_path_us, poster_thumb_us, backdrop_path_us, homepage, colecao_id, slug_pt, slug_en, release_date  
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
                 ON CONFLICT (tmdb_id) DO UPDATE 
                 SET rating = EXCLUDED.rating
                 RETURNING id;
@@ -305,7 +352,7 @@ async function run() {
                         movie.lingua_origem,
                         posterBrS3, posterBrThumbS3, backdropBrS3,
                         posterEnS3, posterEnThumbS3, backdropEnS3,
-                        movie.homepage, colecaoId
+                        movie.homepage, colecaoId, movie.slug_pt, movie.slug_en, movie.release_date
                     ]);
 
                     const internalMovieId = movieRes.rows[0].id;
@@ -370,6 +417,10 @@ async function run() {
         }
     } catch (err) {
         console.error("Erro crítico na conexão ou busca inicial:", err);
+        if (err.response && err.response.status === 429) {
+                    console.log("Limite atingido! Pausando por 30 segundos...");
+                    await sleep(30000); // Pausa longa se a API reclamar
+        }
     } finally {
         // --- GERAÇÃO DO LOG FINAL ---
         if (logsDeErro.length > 0) {

@@ -94,4 +94,14 @@ ALTER TABLE movies ADD COLUMN colecao_id INTEGER REFERENCES colecoes(id) ON DELE
 
 CREATE INDEX IF NOT EXISTS idx_movies_poster_thumb_br ON movies(poster_thumb_br);
 
+ALTER TABLE movies
+ADD COLUMN slug_pt TEXT,
+ADD COLUMN slug_en TEXT;
+
+ALTER TABLE movies 
+ADD CONSTRAINT unique_slug_pt UNIQUE (slug_pt),
+ADD CONSTRAINT unique_slug_en UNIQUE (slug_en);
+
+ALTER TABLE movies ADD COLUMN release_date DATE;
+
 COMMIT;
